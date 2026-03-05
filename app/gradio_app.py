@@ -1326,7 +1326,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
             with gr.Group():
                 gr.Markdown("**Appearance**")
                 
-                current_theme = load_ui_settings().get("theme", "Soft")
+                current_theme = load_ui_settings().get("theme", "Citrus")
                 theme_choices = [
                     "Default", "Soft", "Monochrome", "Glass", "Base", "Ocean", "Origin", "Citrus",
                     "Miku", "Interstellar", "xkcd", "kotaemon"
