@@ -4,13 +4,14 @@
 
 A WIP TTS app built on: https://github.com/jordandare/echo-tts.git
 
+- Functional 2-speaker TTS; Voice cloning; Video translate and dub
 
-
+- Improvements planned for Voice tab and english->english dub sync. And low-vram optimization. 
 
 ---
 
-\## License notice from original repo: 
---
+## License notice from original repo: 
+
 
 Code in this repo is MIT‑licensed except where file headers specify otherwise (e.g., autoencoder.py is Apache‑2.0).
 
