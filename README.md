@@ -4,7 +4,7 @@
 
 A WIP TTS app built on: https://github.com/jordandare/echo-tts.git
 
-- Functional 2-speaker TTS; Voice cloning; Video translate and dub
+- Functional 2-speaker long-form TTS with chunking; Voice cloning; Video translate and dub
 
 - Improvements planned for Voice tab and english->english dub sync. And low-vram optimization. 
 
