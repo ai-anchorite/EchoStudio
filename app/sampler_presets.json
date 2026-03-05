@@ -1,0 +1,62 @@
+{
+  "Balanced (recommended)": {
+    "num_steps": "40",
+    "cfg_scale_text": "3.0",
+    "cfg_scale_speaker": "5.0",
+    "cfg_min_t": "0.5",
+    "cfg_max_t": "1.0",
+    "truncation_factor": "0.8",
+    "rescale_k": "1.2",
+    "rescale_sigma": "3.0"
+  },
+  "Natural - smooth & consistent": {
+    "num_steps": "40",
+    "cfg_scale_text": "3.0",
+    "cfg_scale_speaker": "3.0",
+    "cfg_min_t": "0.5",
+    "cfg_max_t": "1.0",
+    "truncation_factor": "0.8",
+    "rescale_k": "1.2",
+    "rescale_sigma": "3.0"
+  },
+  "Sharp - vivid cloning": {
+    "num_steps": "40",
+    "cfg_scale_text": "3.0",
+    "cfg_scale_speaker": "8.0",
+    "cfg_min_t": "0.5",
+    "cfg_max_t": "1.0",
+    "truncation_factor": "1.0",
+    "rescale_k": "0.96",
+    "rescale_sigma": "3.0"
+  },
+  "Expressive - strong text guidance": {
+    "num_steps": "40",
+    "cfg_scale_text": "8.0",
+    "cfg_scale_speaker": "8.0",
+    "cfg_min_t": "0.5",
+    "cfg_max_t": "1.0",
+    "truncation_factor": "1.0",
+    "rescale_k": "1.0",
+    "rescale_sigma": "3.0"
+  },
+  "Quality - 60 steps": {
+    "num_steps": "60",
+    "cfg_scale_text": "3.0",
+    "cfg_scale_speaker": "5.0",
+    "cfg_min_t": "0.5",
+    "cfg_max_t": "1.0",
+    "truncation_factor": "0.8",
+    "rescale_k": "1.2",
+    "rescale_sigma": "3.0"
+  },
+  "Fast - 20 steps": {
+    "num_steps": "20",
+    "cfg_scale_text": "3.0",
+    "cfg_scale_speaker": "5.0",
+    "cfg_min_t": "0.5",
+    "cfg_max_t": "1.0",
+    "truncation_factor": "0.8",
+    "rescale_k": "1.2",
+    "rescale_sigma": "3.0"
+  }
+}

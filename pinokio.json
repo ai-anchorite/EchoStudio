@@ -1,0 +1,16 @@
+{
+  "title": "echo-tts",
+  "description": "TTS app built around the EchoTTS model.  TTS, Dub, and voice cloning.",
+  "icon": "icon.png",
+  "links": [{
+    "title": "Anchorite (Ported and enhanced)",
+    "links": [{
+      "type": "bitcoin",
+      "value": "bc1qxm7g05cykj7d5ct9shzf7vp4cqgaf7f3670wez"
+    }, {
+      "title": "Github",
+      "value": "https://github.com/ai-anchorite"
+    }]
+  }],
+  "posts": []
+}
