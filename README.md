@@ -1,12 +1,16 @@
-# echo-tts
+# EchoStudio
 
 
 
-A WIP TTS app built on: https://github.com/jordandare/echo-tts.git
+A WIP TTS app built on: https://github.com/jordandare/echo-tts.git and the dev's [Echo-TTS](https://huggingface.co/jordand/echo-tts-base) model
 
+_additional (chunking) code borrowed from: https://github.com/KevinAHM/echo-tts-api_
+
+
+### Features:
 - Functional 2-speaker long-form TTS with chunking; Voice cloning; Video translate and dub
 
-- Improvements planned for Voice tab and english->english dub sync. And low-vram optimization. 
+- Improvements planned for Voice tab; english to english dub sync; and low-vram optimization. 
 
 ---
 
