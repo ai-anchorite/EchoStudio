@@ -6,12 +6,12 @@
 
 **Clone any voice. Dub any video. Edit and isolate vocals with AI source separation.**
 
-[![Install with Pinokio](https://img.shields.io/badge/Install%20with-Pinokio-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJMMiAyMmgyMEwxMiAyeiIvPjwvc3ZnPg==)](https://github.com/ai-anchorite/EchoStudio)
+[![Install with Pinokio](https://img.shields.io/badge/Install%20with-Pinokio-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJMMiAyMmgyMEwxMiAyeiIvPjwvc3ZnPg==)](https://beta.pinokio.co/apps/github-com-ai-anchorite-echostudio)
 
 </div>
 
 <p align="center">
-  <img src="../screenshot.png" alt="App Screenshot" width="720">
+  <img src="icon.png" alt="EchoStudio" width="240">
 </p>
 
 <div align="left">
@@ -26,7 +26,7 @@ An enhanced, one-click installable studio built on the [Echo-TTS](https://jordan
 
 - **VRAM:** 12 GB minimum (NVIDIA GPU recommended)
 - **Platform:** Windows · Linux · macOS
-- **Install:** One click via [Pinokio](https://github.com/ai-anchorite/EchoStudio) — handles Python, dependencies, and model downloads automatically
+- **Install:** One click via [Pinokio](https://beta.pinokio.co/apps/github-com-ai-anchorite-echostudio) — handles Python, dependencies, and model downloads automatically
 
 ## Getting Started
 
