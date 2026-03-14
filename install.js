@@ -20,9 +20,7 @@ module.exports = {
           venv: "env",
           path: "app",
           flashattention: true,
-          // xformers: true,   // uncomment this line if your project requires xformers
           triton: true,
-          // sageattention: true   // uncomment this line if your project requires sageattention
         }
       }
     },

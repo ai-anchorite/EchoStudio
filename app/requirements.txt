@@ -5,3 +5,4 @@ einops
 gradio==5.49.1
 soundfile
 openai-whisper
+audio-separator[gpu]

@@ -47,7 +47,8 @@ from utils import preprocess_text, chunk_text_by_time, format_chunks
 from transcribe import transcribe as whisper_transcribe, WHISPER_MODELS, unload_model as unload_whisper
 from video import (
     extract_audio as video_extract_audio, mux_audio_to_video, get_video_info,
-    get_duration as get_media_duration, clip_audio, trim_silence, normalize_audio,
+    get_duration as get_media_duration, clip_audio, trim_silence, normalize_audio, time_stretch_audio,
+    separate_vocals, mix_audio,
 )
 
 # -------------------------------------------------------------------
@@ -70,6 +71,15 @@ GRADIO_TEMP_DIR = Path(os.environ.get("GRADIO_TEMP_DIR", tempfile.gettempdir()))
 OUTPUT_DIR = None
 
 NO_VOICE_LABEL = "Random voice (no reference)"
+
+# Helper function to generate unique temp filenames
+def get_unique_temp_filename(base_name: str) -> str:
+    """Generate a unique temporary filename with timestamp and random suffix."""
+    import time
+    import secrets
+    timestamp = int(time.time() * 1000)
+    random_suffix = secrets.token_hex(4)
+    return str(TEMP_DUB_DIR / f"{base_name}_{timestamp}_{random_suffix}.wav")
 
 # -------------------------------------------------------------------
 # Model loading (initialized after settings are loaded)
@@ -363,7 +373,7 @@ def dub_extract_and_transcribe(
         raise gr.Error(f"Could not read video: {e}")
 
     # Extract audio
-    extracted_audio_path = str(TEMP_DUB_DIR / "extracted_audio.wav")
+    extracted_audio_path = get_unique_temp_filename("extracted_audio")
     try:
         video_extract_audio(video_path, extracted_audio_path, sample_rate=44100)
     except Exception as e:
@@ -444,6 +454,11 @@ def dub_generate_and_mux(
     segments_data,
     video_duration: float,
     extracted_audio_path,
+    # Background audio preservation
+    preserve_background: bool,
+    bg_volume: float,
+    tts_volume: float,
+    sep_model: str,
     progress=gr.Progress(track_tqdm=False),
 ):
     """Generate time-aligned TTS from segments and mux onto the original video."""
@@ -593,16 +608,36 @@ def dub_generate_and_mux(
     elif audio_to_save.ndim == 3:
         audio_to_save = audio_to_save[0]
 
-    tts_audio_path = str(TEMP_DUB_DIR / "dub_tts.wav")
+    tts_audio_path = get_unique_temp_filename("dub_tts")
     torchaudio.save(tts_audio_path, audio_to_save, SAMPLE_RATE)
 
-    progress(0.85, desc="Muxing audio onto video...")
+    # If preserving background, separate original audio and mix with TTS
+    final_audio_path = tts_audio_path
+    if preserve_background and extracted_audio_path and Path(str(extracted_audio_path)).exists():
+        progress(0.80, desc="Separating background audio...")
+        try:
+            sep_dir = str(TEMP_DUB_DIR / "separation")
+            Path(sep_dir).mkdir(parents=True, exist_ok=True)
+            _, bg_path = separate_vocals(
+                str(extracted_audio_path), sep_dir,
+                model_filename=sep_model,
+            )
+            if bg_path:
+                progress(0.88, desc="Mixing TTS with background...")
+                mixed_path = get_unique_temp_filename("dub_mixed")
+                mix_audio(tts_audio_path, bg_path, mixed_path, volume_1=tts_volume, volume_2=bg_volume)
+                final_audio_path = mixed_path
+        except Exception as e:
+            # Fall back to TTS-only if separation fails
+            progress(0.88, desc=f"Background separation failed ({e}), using TTS only...")
+
+    progress(0.90, desc="Muxing audio onto video...")
 
     # Mux onto video - save to temp first
     stem = make_stem("dubbed", session_id)
     output_video_path = str(TEMP_DUB_DIR / f"{stem}.mp4")
     try:
-        mux_audio_to_video(video_path, tts_audio_path, output_video_path, keep_original_audio=False)
+        mux_audio_to_video(video_path, final_audio_path, output_video_path, keep_original_audio=False)
     except Exception as e:
         raise gr.Error(f"Muxing failed: {e}")
 
@@ -614,9 +649,10 @@ def dub_generate_and_mux(
     gen_time = time.time() - start_time
     audio_duration = audio_to_save.shape[-1] / SAMPLE_RATE
     stretched_count = sum(1 for s in seg_info if not s.get("skipped") and abs(s.get("speed_ratio", 1.0) - 1.0) > 0.05)
+    bg_note = " + background preserved" if preserve_background and final_audio_path != tts_audio_path else ""
     status = (
         f"Dubbed in {gen_time:.1f}s — {audio_duration:.1f}s audio, "
-        f"{total_segs} segments ({stretched_count} time-stretched)."
+        f"{total_segs} segments ({stretched_count} time-stretched){bg_note}."
     )
 
     # Auto-unload models if enabled
@@ -890,7 +926,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
             # --- Voice Section ---
             with gr.Accordion("Voice", open=True):
                 gr.Markdown(
-                    "Select a voice for`[S1]` `[S2]` is optional"
+                    "Select a voice for`[S1]`. `[S2]` is optional.  Use the Voice tab to add and edit voices."
                 )
 
                 with gr.Tabs() as speaker_tabs:
@@ -898,7 +934,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                     with gr.Tab("Speaker 1", id="spk_tab_1"):
                         spk1_source = gr.Radio(
                             choices=["saved", "upload"], value="saved",
-                            label="Source", show_label=False,
+                            label="Source", show_label=False, container=False,
                         )
                         with gr.Group(visible=True) as spk1_saved_group:
                             voice_names = get_voice_names()
@@ -906,23 +942,22 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                                 choices=[NO_VOICE_LABEL] + voice_names,
                                 value=NO_VOICE_LABEL, label="Select Voice", interactive=True,
                             )
-                            spk1_preview = gr.Audio(label="Preview", interactive=False, visible=False)
+                            spk1_preview = gr.Audio(label="Preview", interactive=False, visible=False, )
                         with gr.Group(visible=False) as spk1_upload_group:
                             spk1_audio = gr.Audio(
                                 sources=["upload", "microphone"], type="filepath",
                                 label="Upload or Record",
-                                max_length=600,
                             )
-                            with gr.Accordion("Audio Library", open=False):
-                                audio_prompt_search = gr.Textbox(
-                                    placeholder="Search audio prompts...", label="", lines=1, max_lines=1,
-                                )
-                                audio_prompt_table = gr.Dataframe(
-                                    value=get_audio_prompt_files(),
-                                    headers=["Filename"], datatype=["str"],
-                                    row_count=(6, "dynamic"), col_count=(1, "fixed"),
-                                    interactive=False, label="",
-                                )
+                            # with gr.Accordion("Audio Library", open=False):
+                                # audio_prompt_search = gr.Textbox(
+                                    # placeholder="Search audio prompts...", label="", lines=1, max_lines=1,
+                                # )
+                                # audio_prompt_table = gr.Dataframe(
+                                    # value=get_audio_prompt_files(),
+                                    # headers=["Filename"], datatype=["str"],
+                                    # row_count=(6, "dynamic"), col_count=(1, "fixed"),
+                                    # interactive=False, label="",
+                                # )
 
                     # --- Speaker 2 (always visible, inactive by default) ---
                     with gr.Tab("Speaker 2", id="spk_tab_2"):
@@ -941,7 +976,6 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                             spk2_audio = gr.Audio(
                                 sources=["upload", "microphone"], type="filepath",
                                 label="Upload or Record",
-                                max_length=600,
                             )
 
                 # Alias for audio library event wiring
@@ -955,7 +989,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                     container=False,
                     placeholder="Enter your text here:\n\n The EchoTTS model is trained for 30s of audio output, so longer text will automatically be split into chunks to accomodate this.\n\n "
                     "Click `Pre-process Text` to preview (and edit) the text before generation. This will chunk the text and normalize punctuation. This is optional, "
-                    "the app will automatically do this on generation start, but will respect your edits if you've pre-prosessed. \n "
+                    "the app will automatically do this on generation start, but will respect your edits if you've pre-processed. \n "
                     "Longer chunks of text can also work if manually edited. This will cause the model to speak more quickly to try and fit into the 30s window.\n\n "
                     "Use [S1], [S2] for speaker tags. Use (laughs), (groans), (singing), (angry), (frantic) etc. for expression.\n Leave untagged for automatic [S1] tagging.",
                     lines=9, max_lines=30,
@@ -1093,7 +1127,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
 
 
         # ==============================================================
-        # TAB 3: Dub
+        # TAB 2: Dub
         # ==============================================================
         with gr.Tab("Dub", id="tab_dub"):
 
@@ -1130,7 +1164,8 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                     label="Transcript",
                     show_label=False,
                     container=False,
-                    placeholder="Transcription will appear here after extraction. Each line is tagged [n] with its segment index. Edit the text freely — timing is preserved from the original segments.",
+                    placeholder="Transcription will appear here after extraction. Each line is tagged [n] with its segment index. "
+                    "Edit the text freely — timing is preserved from the original segments.",
                     lines=12, max_lines=12, interactive=True,
                     autoscroll=False,
                 )
@@ -1156,7 +1191,6 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                         dub_spk1_audio = gr.Audio(
                             sources=["upload", "microphone"], type="filepath",
                             label="Upload or Record",
-                            max_length=600,
                         )
 
                 # --- Speaker 2 (inactive by default) ---
@@ -1178,7 +1212,6 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                         dub_spk2_audio = gr.Audio(
                             sources=["upload", "microphone"], type="filepath",
                             label="Upload or Record",
-                            max_length=600,
                         )
 
                 with gr.Accordion("Generation Settings", open=False):
@@ -1237,6 +1270,36 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                 dub_speaker_kv_min_t = gr.Number(value=0.9, visible=False)
                 dub_speaker_kv_max_layers = gr.Number(value=24, visible=False)
 
+            with gr.Accordion("Background Audio", open=False):
+                dub_preserve_background = gr.Checkbox(
+                    label="Preserve background audio",
+                    value=False,
+                    info="Separate vocals from original audio and mix the background/ambience with the new TTS voice.",
+                )
+                with gr.Group(visible=False) as dub_bg_settings_group:
+                    with gr.Row():
+                        dub_bg_volume = gr.Slider(
+                            label="Background Volume", minimum=0.0, maximum=2.0, value=1.0, step=0.1,
+                            info="Relative weight of original background. Lower = subtler ambience.",
+                        )
+                        dub_tts_volume = gr.Slider(
+                            label="TTS Voice Volume", minimum=0.0, maximum=2.0, value=1.0, step=0.1,
+                            info="Relative weight of generated TTS voice. Higher = more prominent.",
+                        )
+                    with gr.Row():
+                        dub_sep_model = gr.Dropdown(
+                            choices=[
+                                "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                                "model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+                                "mel_band_roformer_kim_ft_unwa.ckpt",
+                                "UVR_MDXNET_KARA_2.onnx",
+                                "UVR-MDX-NET-Voc_FT.onnx",
+                            ],
+                            value="model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                            label="Separation Model",
+                            info="BS-Roformer has the best vocal isolation quality",
+                        )
+
             dub_generate_btn = gr.Button("Generate & Dub", variant="primary", size="lg")
 
             gr.HTML('<hr class="section-sep">')
@@ -1256,7 +1319,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
             gr.HTML('<hr class="section-sep">')
 
         # ==============================================================
-        # TAB 2: Voices
+        # TAB 3: Voices
         # ==============================================================
         with gr.Tab("Voices", id="tab_voices"):
 
@@ -1266,54 +1329,136 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
 
             # --- Step 1: Source ---
             with gr.Accordion("1. Source Audio", open=True):
-                gr.Markdown("Upload an audio or video file. Video audio is extracted automatically.")
-                vc_upload = gr.File(
-                    label="Upload Audio or Video",
-                    file_types=["audio", "video"],
-                    
-                )
+                gr.Markdown("Upload an audio or video file. Audio is extracted and sent to Edit automatically.")
                 with gr.Row():
+                    vc_upload = gr.File(
+                        label="Upload Audio or Video",
+                        file_types=["audio", "video"],
+                        # height=140,
+                        scale=5                        
+                    )
                     vc_duration_info = gr.Textbox(
-                        value="", label="Duration", interactive=False, max_lines=1, scale=2,
+                        value="", label="Duration:", interactive=False, container=False, max_lines=1, min_width=60, scale=1,
                     )
+                with gr.Row():
                     vc_extract_status = gr.Textbox(
-                        value="", label="", interactive=False, max_lines=1, scale=3,
+                        value="", label="", show_label=False, interactive=False, container=False, max_lines=1, scale=3,
                     )
+
+                # --- Edit Saved Voices ---
+                with gr.Accordion("Or, Edit a Saved Voice", open=False):
+                    with gr.Row():
+                        manage_voice_dropdown = gr.Dropdown(
+                            choices=["None"] + get_voice_names(), value="None",
+                            label="Select Voice", interactive=True, container=False, scale=1,
+                        )
+                        delete_voice_btn = gr.Button("🗑 Delete", variant="stop", size="sm", scale=2)
+                        send_to_edit_btn = gr.Button("Send to Edit", variant="primary", size="sm", scale=2)
+                    with gr.Row():
+                        manage_voice_preview = gr.Audio(label="Preview", interactive=False)
+                    with gr.Row():
+                        manage_voice_info = gr.Textbox(label="Info", interactive=False, lines=3, max_lines=4, container=False, scale=1)
+                        delete_voice_status = gr.Textbox(label="", interactive=False, lines=1.5, max_lines=2, container=False, scale=2)
 
             # --- Step 2: Clip & Edit ---
             with gr.Accordion("2. Clip & Edit", open=True):
                 with gr.Row():
-                    vc_preview = gr.Audio(label="Preview", interactive=False, max_length=600)
+                    vc_preview = gr.Audio(label="Preview", interactive=False)
+                with gr.Row():                    
+                    with gr.Column():
+                        with gr.Group():
+                            with gr.Row():     
+                                vc_start = gr.Number(label="Start (s)", container=False, value=0, minimum=0, step=0.5, precision=1, min_width=12, scale=1)
+                                vc_end = gr.Number(label="End (s)", container=False, value=30, minimum=0, step=0.5, precision=1, min_width=12, scale=1)
+                            with gr.Row():                            
+                                vc_clip_btn = gr.Button("✂ Clip", size="sm", variant="primary")
+                    with gr.Column():                        
+                        with gr.Group():
+                            with gr.Row():                                
+                                vc_silence_threshold = gr.Slider(
+                                    label="Silence Threshold", minimum=-60, maximum=-10, value=-40, step=1,
+                                    info="Left = less aggressive", scale=2
+                                )
+                                vc_silence_duration = gr.Slider(
+                                    label="Min Silence Duration (s)", minimum=0.1, maximum=2.0, value=0.5, step=0.1,
+                                    info="Shorter = more aggressive", scale=2
+                                )
+                                vc_remove_internal = gr.Checkbox(
+                                    label="Remove Internal Silence", value=True, scale=1,
+                                    info="Uncheck for start/end only"
+                                )
+                            with gr.Row():
+                                vc_trim_btn = gr.Button("Remove Silence", size="sm", variant="huggingface", scale=1)
+                        
                 with gr.Row():
-                    vc_start = gr.Number(label="Start (s)", container=False, value=0, minimum=0, step=0.5, precision=1, scale=1)
-                    vc_end = gr.Number(label="End (s)", container=False, value=30, minimum=0, step=0.5, precision=1, scale=1)
-                    vc_clip_btn = gr.Button("✂ Clip", size="sm", variant="primary", scale=1)
+                    with gr.Column():
+                        with gr.Group():
+                            vc_speed = gr.Slider(
+                                label="Speed", minimum=0.5, maximum=2.0, value=1.0, step=0.1,
+                                info="0.5 = half speed, 2.0 = double speed", scale=2
+                            )
+                            with gr.Row():       
+                                vc_speed_btn = gr.Button("⏱ Apply Speed", size="sm", variant="huggingface", scale=1)
+                    with gr.Column():
+                        with gr.Group():
+                            with gr.Row():
+                                vc_norm_loudness = gr.Slider(
+                                    minimum=-30, maximum=-5, value=-16, step=0.5, 
+                                    label="Target Loudness (LUFS)", info="Lower is quieter", scale=1
+                                )
+                                vc_norm_lra = gr.Slider(
+                                    minimum=1, maximum=20, value=11, step=1, 
+                                    label="Loudness Range", info="Lower is more compressed/consistent", scale=1
+                                )
+                            with gr.Row():   
+                                vc_normalize_btn = gr.Button("Normalize Volume", size="sm", variant="huggingface", scale=1)
+
                 with gr.Row():
-                    vc_trim_btn = gr.Button("Remove Silence", size="sm", scale=1)
-                    vc_normalize_btn = gr.Button("Normalize Volume", size="sm", scale=1)
-                vc_edit_status = gr.Textbox(value="", label="", show_label=False, container=False, interactive=False, max_lines=1)
+                    with gr.Group():
+                        with gr.Row():                       
+                            vc_sep_model = gr.Dropdown(
+                                choices=[
+                                    "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                                    "model_bs_roformer_ep_368_sdr_12.9628.ckpt",
+                                    "mel_band_roformer_kim_ft_unwa.ckpt",
+                                    "UVR_MDXNET_KARA_2.onnx",
+                                    "UVR-MDX-NET-Voc_FT.onnx",
+                                ],
+                                value="model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+                                label="Separation Model",
+                                info="BS-Roformer has the best vocal isolation quality",
+                                scale=1,
+                            )
+                            vc_sep_segment = gr.Slider(
+                                label="Segment Size", minimum=64, maximum=512, value=256, step=64,
+                                info="Larger = more VRAM, potentially better quality",
+                                scale=1,
+                            )
+                            vc_sep_overlap = gr.Slider(
+                                label="Overlap", minimum=2, maximum=50, value=8, step=2,
+                                info="Higher = better quality, slower",
+                                scale=1,
+                            )
+                        with gr.Row():
+                            vc_sep_vocals_btn = gr.Button("🎤 Isolate Vocals", size="sm", variant="primary", scale=1)
+                            vc_sep_background_btn = gr.Button("🔇 Isolate Background", size="sm", variant="huggingface", scale=1)
+
+                with gr.Row():  
+                    vc_reset_btn = gr.Button("↺ Reset Sample", size="sm", variant="stop", scale=1)
+                    vc_edit_status = gr.Textbox(value="", label="", show_label=False, container=False, interactive=False, max_lines=1)
 
             # --- Step 3: Save ---
-            with gr.Accordion("3. Save Character", open=True):
-                with gr.Row():
-                    new_voice_name = gr.Textbox(label="Character Name", placeholder="e.g. 'Morgan' or 'Narrator'", scale=2)
-                    save_voice_btn = gr.Button("💾 Save", variant="primary", size="sm", scale=1)
-                save_voice_status = gr.Textbox(label="", interactive=False, max_lines=2)
+            with gr.Accordion("3. Save Voice", open=True):
+                with gr.Group():
+                    with gr.Row():
+                        new_voice_name = gr.Textbox(label="Character Name", placeholder="e.g. 'Morgan' or 'Narrator1'", container=False, lines=1, scale=1)
+                        save_voice_btn = gr.Button("💾 Save", variant="primary", size="lg", scale=1)
+                    with gr.Row():    
+                        save_voice_status = gr.Textbox(label="", interactive=False, lines=1.5, max_lines=2)
 
             gr.HTML('<hr class="section-sep">')
 
-            # --- Manage Saved Voices ---
-            with gr.Accordion("Saved Voices", open=False):
-                with gr.Row():
-                    manage_voice_dropdown = gr.Dropdown(
-                        choices=["None"] + get_voice_names(), value="None",
-                        label="Select Voice", interactive=True, scale=2,
-                    )
-                    delete_voice_btn = gr.Button("🗑 Delete", variant="stop", size="sm", scale=1)
-                manage_voice_preview = gr.Audio(label="Preview", interactive=False)
-                with gr.Row():
-                    manage_voice_info = gr.Textbox(label="Info", interactive=False, lines=3, max_lines=4, scale=2)
-                    delete_voice_status = gr.Textbox(label="", interactive=False, max_lines=2, scale=1)
+
 
 
         # ==============================================================
@@ -1324,9 +1469,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
             
             # Theme selector
             with gr.Group():
-                gr.Markdown("**Appearance**")
-                
-                current_theme = load_ui_settings().get("theme", "Citrus")
+                current_theme = load_ui_settings().get("theme", "Soft")
                 theme_choices = [
                     "Default", "Soft", "Monochrome", "Glass", "Base", "Ocean", "Origin", "Citrus",
                     "Miku", "Interstellar", "xkcd", "kotaemon"
@@ -1338,69 +1481,63 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                     label="Theme",
                     info="Select a theme for the interface. Changes apply on next app startup.",
                 )
-                
-                gr.Markdown("*Theme will apply on next app startup.*")
             
             gr.HTML('<hr class="section-sep">')
             
             # Model management
-            with gr.Group():
-                gr.Markdown("**Memory Management**")
-                
-                # Load current settings
-                current_settings = load_ui_settings()
-                current_fish_ae_dtype = current_settings.get("fish_ae_dtype", "float32")
-                current_auto_unload = current_settings.get("auto_unload_models", False)
-                
-                fish_ae_dtype_dropdown = gr.Dropdown(
-                    choices=["float32", "bfloat16"],
-                    value=current_fish_ae_dtype,
-                    label="Fish Autoencoder Dtype",
-                    info="Use 'bfloat16' for 8GB GPUs to reduce memory usage. Requires app restart.",
-                )
-                
-                gr.Markdown("*Dtype setting will apply on next app startup.*")
+            with gr.Accordion("Memory Management"):
+                with gr.Group():
+                    
+                    # Load current settings
+                    current_settings = load_ui_settings()
+                    current_fish_ae_dtype = current_settings.get("fish_ae_dtype", "float32")
+                    current_auto_unload = current_settings.get("auto_unload_models", False)
+                    
+                    fish_ae_dtype_dropdown = gr.Dropdown(
+                        choices=["float32", "bfloat16"],
+                        value=current_fish_ae_dtype,
+                        label="Fish Autoencoder Dtype",
+                        info="Use 'bfloat16' to reduce memory usage. Requires app restart.",
+                    )
                 
                 gr.Markdown("---")
                 
                 auto_unload_checkbox = gr.Checkbox(
                     label="Auto-unload models after inference",
                     value=current_auto_unload,
-                    info="Frees GPU/CPU memory after generation completes. Models will reload on next generation.",
+                    info="Free memory after generation completes. Models will reload on next generation.",
                 )
                 
                 unload_now_btn = gr.Button("Unload Models Now", variant="secondary")
 
             gr.HTML('<hr class="section-sep">')
             
-            # File Management
-            with gr.Group():
-                gr.Markdown("**File Management**")
-                
-                # Load current settings
-                current_output_dir = current_settings.get("output_dir", "./outputs")
-                current_clear_temp = current_settings.get("clear_temp_on_start", False)
-                
-                output_dir_textbox = gr.Textbox(
-                    label="Output Directory",
-                    value=current_output_dir,
-                    info="Custom location for saved audio files. Requires app restart.",
-                    placeholder="./outputs"
-                )
-                
-                gr.Markdown("*Output directory will apply on next app startup.*")
-                
+            with gr.Accordion("File Management"):
+                with gr.Group():
+                    # Load current settings
+                    current_output_dir = current_settings.get("output_dir", "./outputs")
+                    current_clear_temp = current_settings.get("clear_temp_on_start", False)
+                    
+                    output_dir_textbox = gr.Textbox(
+                        label="Output Directory",
+                        value=current_output_dir,
+                        info="Custom location for saved audio files. Requires app restart.",
+                        placeholder="./outputs"
+                    )
+                    
                 gr.Markdown("---")
-                
-                clear_temp_on_start_checkbox = gr.Checkbox(
-                    label="Clear temp files on app start",
-                    value=current_clear_temp,
-                    info="Automatically clears temporary audio and video files when the app starts.",
-                )
-                
-                with gr.Row():
-                    clear_temp_now_btn = gr.Button("Clear Temp Files Now", variant="secondary")
-                    clear_temp_status = gr.Textbox(label="", show_label=False, interactive=False, scale=2)
+
+                with gr.Group():    
+                    clear_temp_on_start_checkbox = gr.Checkbox(
+                        label="Clear temp files on app start",
+                        value=current_clear_temp,
+                        info="Automatically clears temporary audio and video files when the app starts.",
+                    )
+                    clear_temp_now_btn = gr.Button("Clear Temp Files Now", variant="secondary") 
+
+            gr.HTML('<hr class="section-sep">')
+            with gr.Row():
+                clear_temp_status = gr.Textbox(label="", show_label=False, interactive=False)
 
             gr.HTML('<hr class="section-sep">')
 
@@ -1477,7 +1614,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
     # ==================================================================
 
     # ------------------------------------------------------------------
-    # Settings tab events
+    # TTS tab events
     # ------------------------------------------------------------------
 
     # --- Per-speaker source toggles ---
@@ -1611,6 +1748,13 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
         outputs=[dub_spk2_saved_group, dub_spk2_upload_group]
     )
 
+    # Preserve background toggle — show/hide volume controls
+    dub_preserve_background.change(
+        lambda enabled: gr.update(visible=enabled),
+        inputs=[dub_preserve_background],
+        outputs=[dub_bg_settings_group],
+    )
+
     # Speaker dropdown previews for Dub tab
     def _on_dub_spk_dropdown(voice_name):
         if not voice_name or voice_name in (NO_VOICE_LABEL, "Inactive"):
@@ -1645,6 +1789,8 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
             dub_audio_format, session_id_state,
             dub_segments_state, dub_video_duration_state,
             dub_extracted_audio_path,
+            # Background audio preservation
+            dub_preserve_background, dub_bg_volume, dub_tts_volume, dub_sep_model,
         ],
         outputs=[dub_output_video, dub_status],
     ).then(
@@ -1677,7 +1823,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
         try:
             if fp.suffix.lower() in video_exts:
                 # Extract audio from video
-                out_path = str(TEMP_DUB_DIR / "vc_extracted.wav")
+                out_path = get_unique_temp_filename("vc_extracted")
                 video_extract_audio(file_path, out_path)
                 dur = get_media_duration(out_path)
                 return (
@@ -1711,7 +1857,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
         if not source_path:
             return None, gr.update(value=None), gr.update(value="Upload audio first.")
         try:
-            out = str(TEMP_DUB_DIR / "vc_clipped.wav")
+            out = get_unique_temp_filename("vc_clipped")
             clip_audio(source_path, out, float(start), float(end))
             dur = get_media_duration(out)
             return out, gr.update(value=out), gr.update(value=f"Clipped to {dur:.1f}s")
@@ -1724,39 +1870,126 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
     )
 
     # Trim silence
-    # Lets consider ffmpeg's silenceremove here for removing long pauses in the reference audio. with exposed useful parameters
-    def vc_on_trim(working_path):
+    def vc_on_trim(working_path, threshold_db, stop_duration, remove_internal):
         if not working_path:
             return None, gr.update(), gr.update(value="No audio to trim.")
         try:
-            out = str(TEMP_DUB_DIR / "vc_trimmed.wav")
-            trim_silence(working_path, out)
+            out = get_unique_temp_filename("vc_trimmed")
+            trim_silence(working_path, out, threshold_db=int(threshold_db), stop_duration=float(stop_duration), remove_internal=remove_internal)
             dur = get_media_duration(out)
             return out, gr.update(value=out), gr.update(value=f"Silence removed — {dur:.1f}s")
         except Exception as e:
             return None, gr.update(), gr.update(value=f"Trim error: {e}")
 
     vc_trim_btn.click(
-        vc_on_trim, inputs=[vc_working_path],
+        vc_on_trim, inputs=[vc_working_path, vc_silence_threshold, vc_silence_duration, vc_remove_internal],
+        outputs=[vc_working_path, vc_preview, vc_edit_status],
+    )
+
+    # Apply speed adjustment
+    def vc_on_speed(working_path, speed):
+        if not working_path:
+            return None, gr.update(), gr.update(value="No audio to adjust.")
+        if speed == 1.0:
+            return working_path, gr.update(value=working_path), gr.update(value="Speed unchanged (1.0x)")
+        try:
+            out = get_unique_temp_filename("vc_speed_adjusted")
+            source_dur = get_media_duration(working_path)
+            target_dur = source_dur / speed  # speed > 1 = faster, < 1 = slower
+            time_stretch_audio(working_path, out, target_dur)
+            dur = get_media_duration(out)
+            return out, gr.update(value=out), gr.update(value=f"Speed adjusted to {speed:.1f}x — {dur:.1f}s")
+        except Exception as e:
+            return None, gr.update(), gr.update(value=f"Speed error: {e}")
+
+    vc_speed_btn.click(
+        vc_on_speed, inputs=[vc_working_path, vc_speed],
         outputs=[vc_working_path, vc_preview, vc_edit_status],
     )
 
     # Normalize volume
-    # lets consider ffmpeg-normalize instead here
-    
-    def vc_on_normalize(working_path):
+    # def vc_on_normalize(working_path):
+        # if not working_path:
+            # return None, gr.update(), gr.update(value="No audio to normalize.")
+        # try:
+            # out = get_unique_temp_filename("vc_normalized")
+            # normalize_audio(working_path, out)
+            # dur = get_media_duration(out)
+            # return out, gr.update(value=out), gr.update(value=f"Volume normalized — {dur:.1f}s")
+        # except Exception as e:
+            # return None, gr.update(), gr.update(value=f"Normalize error: {e}")
+
+    # vc_normalize_btn.click(
+        # vc_on_normalize, inputs=[vc_working_path],
+        # outputs=[vc_working_path, vc_preview, vc_edit_status],
+    # )
+    def vc_on_normalize(working_path, target_i, target_lra):
         if not working_path:
             return None, gr.update(), gr.update(value="No audio to normalize.")
         try:
-            out = str(TEMP_DUB_DIR / "vc_normalized.wav")
-            normalize_audio(working_path, out)
-            dur = get_media_duration(out)
-            return out, gr.update(value=out), gr.update(value=f"Volume normalized — {dur:.1f}s")
+            out = get_unique_temp_filename("vc_normalized")
+            _, applied_gain = normalize_audio(working_path, out, target_i=target_i, target_lra=target_lra)
+            sign = "+" if applied_gain >= 0 else ""
+            return out, gr.update(value=out), gr.update(value=f"✅ Normalized to {target_i:.0f} LUFS (LRA {target_lra:.0f}) — {sign}{applied_gain:.1f} dB gain applied")
         except Exception as e:
             return None, gr.update(), gr.update(value=f"Normalize error: {e}")
 
     vc_normalize_btn.click(
-        vc_on_normalize, inputs=[vc_working_path],
+        vc_on_normalize, 
+        inputs=[vc_working_path, vc_norm_loudness, vc_norm_lra],
+        outputs=[vc_working_path, vc_preview, vc_edit_status],
+    )
+
+    # Reset to original source
+    def vc_on_reset(source_path, working_path):
+        if not source_path:
+            return None, gr.update(), gr.update(value="No source audio to reset to.")
+        try:
+            # Reset working path to source path
+            dur = get_media_duration(source_path)
+            return source_path, gr.update(value=source_path), gr.update(value=f"Reset to original — {dur:.1f}s")
+        except Exception as e:
+            return None, gr.update(), gr.update(value=f"Reset error: {e}")
+
+    vc_reset_btn.click(
+        vc_on_reset, inputs=[vc_source_path, vc_working_path],
+        outputs=[vc_working_path, vc_preview, vc_edit_status],
+    )
+
+    # Separate vocals — isolate voice from working audio
+    def vc_on_separate(working_path, model_filename, segment_size, overlap, stem="vocals"):
+        if not working_path:
+            return None, gr.update(), gr.update(value="No audio to separate.")
+        try:
+            sep_dir = str(TEMP_AUDIO_DIR / "separation")
+            Path(sep_dir).mkdir(parents=True, exist_ok=True)
+            vocals_path, instrumental_path = separate_vocals(
+                working_path, sep_dir,
+                model_filename=model_filename,
+                segment_size=int(segment_size),
+                overlap=int(overlap),
+            )
+            if stem == "vocals" and vocals_path:
+                dur = get_media_duration(vocals_path)
+                return vocals_path, gr.update(value=vocals_path), gr.update(value=f"🎤 Vocals isolated — {dur:.1f}s")
+            elif stem == "background" and instrumental_path:
+                dur = get_media_duration(instrumental_path)
+                return instrumental_path, gr.update(value=instrumental_path), gr.update(value=f"🔇 Background isolated — {dur:.1f}s")
+            else:
+                return None, gr.update(), gr.update(value="Separation produced no output for the requested stem.")
+        except ImportError:
+            return None, gr.update(), gr.update(value="audio-separator not installed. Run: pip install \"audio-separator[gpu]\"")
+        except Exception as e:
+            return None, gr.update(), gr.update(value=f"Separation error: {e}")
+
+    vc_sep_vocals_btn.click(
+        lambda wp, m, s, o: vc_on_separate(wp, m, s, o, stem="vocals"),
+        inputs=[vc_working_path, vc_sep_model, vc_sep_segment, vc_sep_overlap],
+        outputs=[vc_working_path, vc_preview, vc_edit_status],
+    )
+    vc_sep_background_btn.click(
+        lambda wp, m, s, o: vc_on_separate(wp, m, s, o, stem="background"),
+        inputs=[vc_working_path, vc_sep_model, vc_sep_segment, vc_sep_overlap],
         outputs=[vc_working_path, vc_preview, vc_edit_status],
     )
 
@@ -1772,6 +2005,32 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
     ).then(
         lambda: gr.update(choices=["None"] + get_voice_names()),
         outputs=[manage_voice_dropdown],
+    )
+
+    # Send saved voice to edit pipeline
+    def vc_on_send_to_edit(voice_name):
+        if not voice_name or voice_name == "None":
+            return None, None, gr.update(value=""), gr.update(value="Select a voice first."), gr.update(value=None), gr.update(value=0), gr.update(value=30), gr.update()
+        audio_path = load_voice_audio(voice_name)
+        if not audio_path:
+            return None, None, gr.update(value=""), gr.update(value=f"No audio found for '{voice_name}'."), gr.update(value=None), gr.update(value=0), gr.update(value=30), gr.update()
+        try:
+            dur = get_media_duration(audio_path)
+            return (
+                audio_path, audio_path,
+                gr.update(value=f"{dur:.1f}s"),
+                gr.update(value=f"Loaded '{voice_name}' for editing."),
+                gr.update(value=audio_path),
+                gr.update(value=0),
+                gr.update(value=min(30, dur)),
+                gr.update(value=voice_name),
+            )
+        except Exception as e:
+            return None, None, gr.update(value=""), gr.update(value=f"Error: {e}"), gr.update(value=None), gr.update(value=0), gr.update(value=30), gr.update()
+
+    send_to_edit_btn.click(
+        vc_on_send_to_edit, inputs=[manage_voice_dropdown],
+        outputs=[vc_source_path, vc_working_path, vc_duration_info, vc_extract_status, vc_preview, vc_start, vc_end, new_voice_name],
     )
 
     # Delete voice
