@@ -205,7 +205,7 @@ def get_theme_from_settings():
     elif theme_name in community_themes:
         return community_themes[theme_name]
     else:
-        return gr.themes.Soft()  # Default fallback
+        return gr.themes.Citrus()  # Default fallback
 
 
 def get_memory_settings():

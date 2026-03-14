@@ -24,5 +24,26 @@ module.exports = {
         }
       }
     },
+
+    // audio-separator: GPU for nvidia, CPU for everything else
+    {
+      when: "{{gpu === 'nvidia'}}",
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "app",
+        message: "uv pip install audio-separator[gpu]"
+      },
+      next: null
+    },
+    {
+      method: "shell.run",
+      params: {
+        venv: "env",
+        path: "app",
+        message: "uv pip install audio-separator[cpu]"
+      }
+    },
+
   ]
 }
