@@ -1,5 +1,5 @@
 {
-  "title": "echo-tts",
+  "title": "EchoStudio",
   "description": "TTS app built around the EchoTTS model.  TTS, Dub, and voice cloning.",
   "icon": "icon.png",
   "links": [{
