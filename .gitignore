@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+app/env/
+
+# User voices (created at runtime)
+app/voices/
+
+# Temp and output directories
+app/temp_gradio_audio/
+app/temp_dub/
+app/outputs/
+
+# Cache
+cache/
+
+# Logs
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
