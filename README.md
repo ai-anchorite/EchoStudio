@@ -4,7 +4,6 @@
 
 **Local text-to-speech with voice cloning, video dubbing, and voice editing.**
 
-**Clone any voice. Dub any video. Edit and isolate vocals with AI source separation.**
 
 [![Install with Pinokio](https://img.shields.io/badge/Install%20with-Pinokio-blue?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJ3aGl0ZSI+PHBhdGggZD0iTTEyIDJMMiAyMmgyMEwxMiAyeiIvPjwvc3ZnPg==)](https://beta.pinokio.co/apps/github-com-ai-anchorite-echostudio)
 
@@ -18,9 +17,9 @@
 
 ## What is this?
 
-An enhanced, one-click installable studio built on the [Echo-TTS](https://jordandarefsky.com/blog/2025/echo/) model by Jordan Darefsky — packaged for creators who want voice cloning, video dubbing, and voice editing without the setup headaches.
+An enhanced, one-click installable studio built on the [Echo-TTS](https://github.com/jordandare/echo-tts.git) project by Jordan Darefsky — enhanced for creators who want voice cloning, video dubbing, and voice editing without the setup headaches.
 
-**Model:** [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | **Demo:** [echo-tts-preview](https://huggingface.co/spaces/jordand/echo-tts-preview)
+**Model:** [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | **Blog:** [echo-tts blog post](https://jordandarefsky.com/blog/2025/echo/)
 
 ## 🖥️ Requirements
 
