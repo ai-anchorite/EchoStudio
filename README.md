@@ -17,7 +17,7 @@
 
 ## What is this?
 
-An enhanced, one-click installable studio built on the [Echo-TTS](https://github.com/jordandare/echo-tts.git) project by Jordan Darefsky — enhanced for creators who want voice cloning, video dubbing, and voice editing without the setup headaches.
+An enhanced, one-click installable studio built on the [Echo-TTS](https://github.com/jordandare/echo-tts.git) project by Jordan Darefsky, with additional code (chunking, etc) borrowed from [KevinAHM/echo-tts-api](https://github.com/KevinAHM/echo-tts-api) - enhanced for creators who want a quality TTS with voice cloning and video translation dubbing without the setup headaches.
 
 **Model:** [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | **Blog:** [echo-tts blog post](https://jordandarefsky.com/blog/2025/echo/)
 
@@ -44,13 +44,13 @@ An enhanced, one-click installable studio built on the [Echo-TTS](https://github
 ### Dub
 - Upload video, extract audio, and transcribe/translate with Whisper
 - Editable transcript with segment timing
-- Re-voice with TTS using cloned or saved voices
+- Re-voice translated speech with TTS using cloned or saved voices
 - Preserve background audio — AI source separation mixes ambient/background with the new TTS voice
 - Multi-speaker dubbing with S1/S2 tags
 
 ### Voices
 - Upload audio or video files as voice sources
-- Edit saved voices directly via "Send to Edit"
+- Edit saved voices directly
 - Clip, trim silence, adjust speed, and normalize volume
 - Vocal isolation — separate clean vocals from noisy recordings (BS-Roformer, MDX-Net via audio-separator)
 - Background isolation for extracting ambience/music
