@@ -1448,7 +1448,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                     vc_edit_status = gr.Textbox(value="", label="", show_label=False, container=False, interactive=False, max_lines=1)
 
             # --- Step 3: Save ---
-            with gr.Accordion("3. Save Voice", open=True):
+            with gr.Accordion("3. Process and Save Voice", open=True):
                 with gr.Group():
                     with gr.Row():
                         new_voice_name = gr.Textbox(label="Character Name", placeholder="e.g. 'Morgan' or 'Narrator1'", container=False, lines=1, scale=1)
