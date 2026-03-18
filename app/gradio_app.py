@@ -1523,7 +1523,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                             label="Offload autoencoder to CPU",
                             value=current_offload_fish_ae,
                             info="Keep Fish AE on CPU, move to GPU only for encode/decode. "
-                                 "Frees ~200-400MB VRAM. Requires app restart.",
+                                 "Frees ~2GB VRAM during inference. Requires app restart.",
                         )
                         auto_unload_checkbox = gr.Checkbox(
                             label="Auto-unload models after inference",
