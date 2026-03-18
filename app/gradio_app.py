@@ -44,6 +44,7 @@ from voices import (
     get_voice_preview_path,
 )
 from utils import preprocess_text, chunk_text_by_time, format_chunks
+from generate import get_chunk_timing
 from transcribe import transcribe as whisper_transcribe, WHISPER_MODELS, unload_model as unload_whisper
 from video import (
     extract_audio as video_extract_audio, mux_audio_to_video, get_video_info,
@@ -221,7 +222,7 @@ def get_memory_settings():
 
 # Load memory settings
 FISH_AE_DTYPE = get_memory_settings()
-DEFAULT_SAMPLE_LATENT_LENGTH = 640
+DEFAULT_SAMPLE_LATENT_LENGTH = load_ui_settings().get("sample_latent_length", 640)
 
 # Load auto-unload setting
 auto_unload_models = load_ui_settings().get("auto_unload_models", False)
@@ -245,10 +246,12 @@ if settings.get("clear_temp_on_start", False):
                     pass  # Ignore errors during cleanup
 
 # Initialize ModelManager with memory settings
+OFFLOAD_FISH_AE = load_ui_settings().get("offload_fish_ae", False)
 model_manager = ModelManager(
     model_dtype=MODEL_DTYPE,
     fish_ae_dtype=FISH_AE_DTYPE,
     device=get_device(),
+    offload_fish_ae=OFFLOAD_FISH_AE,
 )
 model_manager.pre_download_models()
 
@@ -599,6 +602,7 @@ def dub_generate_and_mux(
         speaker_kv_max_layers=spk_kv_max_layers,
         sample_latent_length=DEFAULT_SAMPLE_LATENT_LENGTH,
         progress_callback=progress_cb,
+        fish_ae_ctx=model_manager.fish_ae_on_device if model_manager.offload_fish_ae else None,
     )
 
     # Save generated audio to temp
@@ -747,7 +751,7 @@ def generate_audio(
     spk_kv_min_t = float(speaker_kv_min_t) if force_speaker else None
     spk_kv_max_layers = int(speaker_kv_max_layers) if force_speaker else None
 
-    chunks = chunk_text_by_time(text_prompt)
+    chunks = chunk_text_by_time(text_prompt, **get_chunk_timing(DEFAULT_SAMPLE_LATENT_LENGTH))
     is_long_form = len(chunks) > 1
 
     def progress_cb(chunk_idx, total, chunk_text):
@@ -778,6 +782,7 @@ def generate_audio(
         progress_callback=progress_cb if is_long_form else None,
         crossfade_ms=int(crossfade_ms_val),
         inter_chunk_silence_ms=int(inter_chunk_silence),
+        fish_ae_ctx=model_manager.fish_ae_on_device if model_manager.offload_fish_ae else None,
     )
 
     # Ensure 2D for saving
@@ -1492,23 +1497,44 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
                     current_settings = load_ui_settings()
                     current_fish_ae_dtype = current_settings.get("fish_ae_dtype", "float32")
                     current_auto_unload = current_settings.get("auto_unload_models", False)
+                    current_offload_fish_ae = current_settings.get("offload_fish_ae", False)
+                    current_sample_latent_length = current_settings.get("sample_latent_length", 640)
                     
-                    fish_ae_dtype_dropdown = gr.Dropdown(
-                        choices=["float32", "bfloat16"],
-                        value=current_fish_ae_dtype,
-                        label="Fish Autoencoder Dtype",
-                        info="Use 'bfloat16' to reduce memory usage. Requires app restart.",
-                    )
+                    with gr.Row():
+                        fish_ae_dtype_dropdown = gr.Dropdown(
+                            choices=["float32", "bfloat16"],
+                            value=current_fish_ae_dtype,
+                            label="Fish Autoencoder Dtype",
+                            info="Use 'bfloat16' to reduce memory usage. Requires app restart.",
+                        )
+                        sample_latent_length_slider = gr.Slider(
+                            minimum=320,
+                            maximum=640,
+                            step=32,
+                            value=current_sample_latent_length,
+                            label="Sample Latent Length",
+                            info="Max generation window in latents (640 ≈ 30s, 320 ≈ 15s). "
+                                 "Lower values reduce VRAM slightly but process in smaller chunks. "
+                                 "Takes effect on next generation.",
+                        )
+                    
+                    with gr.Row():
+                        offload_fish_ae_checkbox = gr.Checkbox(
+                            label="Offload autoencoder to CPU",
+                            value=current_offload_fish_ae,
+                            info="Keep Fish AE on CPU, move to GPU only for encode/decode. "
+                                 "Frees ~200-400MB VRAM. Requires app restart.",
+                        )
+                        auto_unload_checkbox = gr.Checkbox(
+                            label="Auto-unload models after inference",
+                            value=current_auto_unload,
+                            info="Free memory after generation completes. Models reload on next generation.",
+                        )
+
                 
                 gr.Markdown("---")
                 
-                auto_unload_checkbox = gr.Checkbox(
-                    label="Auto-unload models after inference",
-                    value=current_auto_unload,
-                    info="Free memory after generation completes. Models will reload on next generation.",
-                )
-                
-                unload_now_btn = gr.Button("Unload Models Now", variant="secondary")
+                unload_now_btn = gr.Button("Unload Models Now", variant="stop")
 
             gr.HTML('<hr class="section-sep">')
             
@@ -1580,6 +1606,20 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
         settings["fish_ae_dtype"] = dtype_value
         save_ui_settings(settings)
     
+    def on_sample_latent_length_change(value):
+        """Handle Sample Latent Length slider change."""
+        global DEFAULT_SAMPLE_LATENT_LENGTH
+        DEFAULT_SAMPLE_LATENT_LENGTH = int(value)
+        settings = load_ui_settings()
+        settings["sample_latent_length"] = int(value)
+        save_ui_settings(settings)
+    
+    def on_offload_fish_ae_change(value):
+        """Handle offload autoencoder checkbox change."""
+        settings = load_ui_settings()
+        settings["offload_fish_ae"] = value
+        save_ui_settings(settings)
+    
     def on_output_dir_change(dir_value):
         """Handle output directory textbox change."""
         settings = load_ui_settings()
@@ -1648,7 +1688,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
     def on_preprocess_text(text):
         if not text or not text.strip():
             return gr.update()
-        chunks = chunk_text_by_time(text)
+        chunks = chunk_text_by_time(text, **get_chunk_timing(DEFAULT_SAMPLE_LATENT_LENGTH))
         if not chunks:
             return gr.update(value=preprocess_text(text))
         return gr.update(value=format_chunks(chunks))
@@ -1690,7 +1730,7 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
             return "0 chars | ~0s estimated"
         chars = len(text)
         est_seconds = max(chars / 14.0, len(text.split()) / 2.7)
-        chunks = chunk_text_by_time(text)
+        chunks = chunk_text_by_time(text, **get_chunk_timing(DEFAULT_SAMPLE_LATENT_LENGTH))
         chunk_info = f" | {len(chunks)} chunk(s)" if len(chunks) > 1 else ""
         return f"{chars} chars | ~{est_seconds:.0f}s estimated{chunk_info}"
 
@@ -2048,6 +2088,8 @@ with gr.Blocks(title="Echo TTS Studio", css=APP_CSS, theme=get_theme_from_settin
     
     theme_dropdown.change(on_theme_change, inputs=[theme_dropdown], outputs=[])
     fish_ae_dtype_dropdown.change(on_fish_ae_dtype_change, inputs=[fish_ae_dtype_dropdown], outputs=[])
+    sample_latent_length_slider.change(on_sample_latent_length_change, inputs=[sample_latent_length_slider], outputs=[])
+    offload_fish_ae_checkbox.change(on_offload_fish_ae_change, inputs=[offload_fish_ae_checkbox], outputs=[])
     auto_unload_checkbox.change(on_auto_unload_toggle, inputs=[auto_unload_checkbox], outputs=[])
     unload_now_btn.click(on_unload_now, outputs=[])
     output_dir_textbox.change(on_output_dir_change, inputs=[output_dir_textbox], outputs=[])

@@ -263,6 +263,40 @@ def parse_chunked_text(text: str) -> List[str] | None:
     return chunks if chunks else None
 
 
+def _split_long_sentence(text: str, max_seconds: float,
+                         chars_per_second: float, words_per_second: float) -> List[str]:
+    """Sub-split a sentence that exceeds max_seconds at clause boundaries.
+
+    Tries commas, semicolons, colons, and dashes as split points.
+    Falls back to returning the original text if no good splits exist.
+    """
+    # Split at clause-level punctuation, keeping the delimiter with the left part
+    clause_pattern = re.compile(r'(?<=[,;:\u2014–—-])\s+')
+    parts = clause_pattern.split(text)
+    if len(parts) <= 1:
+        return [text]
+
+    result: List[str] = []
+    current = parts[0]
+    current_secs = _estimate_seconds(current, chars_per_second, words_per_second)
+
+    for part in parts[1:]:
+        part_secs = _estimate_seconds(part, chars_per_second, words_per_second)
+        projected = current_secs + part_secs
+        if projected > max_seconds and current.strip():
+            result.append(current.strip())
+            current = part
+            current_secs = part_secs
+        else:
+            current = current + " " + part
+            current_secs = projected
+
+    if current.strip():
+        result.append(current.strip())
+
+    return result if result else [text]
+
+
 def chunk_text_by_time(
     full_text: str,
     target_seconds: float = 28.0,
@@ -307,10 +341,19 @@ def chunk_text_by_time(
         if not chunk_sentences:
             first_tag = sentence_tag
             last_tag = sentence_tag
-            chunk_sentences = [f"{sentence_tag} {sentence_text}"]
-            chunk_secs = sent_secs
             if sent_secs >= max_seconds:
-                flush_chunk()
+                # Sub-split oversized sentence at clause boundaries
+                sub_parts = _split_long_sentence(sentence_text, max_seconds,
+                                                  chars_per_second, words_per_second)
+                for part in sub_parts:
+                    chunk_sentences = [f"{sentence_tag} {part}"]
+                    chunk_secs = _estimate_seconds(part, chars_per_second, words_per_second)
+                    first_tag = sentence_tag
+                    last_tag = sentence_tag
+                    flush_chunk()
+            else:
+                chunk_sentences = [f"{sentence_tag} {sentence_text}"]
+                chunk_secs = sent_secs
             continue
 
         projected = chunk_secs + sent_secs
@@ -318,10 +361,18 @@ def chunk_text_by_time(
             flush_chunk()
             first_tag = sentence_tag
             last_tag = sentence_tag
-            chunk_sentences = [f"{sentence_tag} {sentence_text}"]
-            chunk_secs = sent_secs
             if sent_secs >= max_seconds:
-                flush_chunk()
+                sub_parts = _split_long_sentence(sentence_text, max_seconds,
+                                                  chars_per_second, words_per_second)
+                for part in sub_parts:
+                    chunk_sentences = [f"{sentence_tag} {part}"]
+                    chunk_secs = _estimate_seconds(part, chars_per_second, words_per_second)
+                    first_tag = sentence_tag
+                    last_tag = sentence_tag
+                    flush_chunk()
+            else:
+                chunk_sentences = [f"{sentence_tag} {sentence_text}"]
+                chunk_secs = sent_secs
             continue
 
         if sentence_tag != last_tag:

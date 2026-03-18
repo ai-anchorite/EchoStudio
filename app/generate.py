@@ -34,6 +34,24 @@ CROSSFADE_SAMPLES = int(SAMPLE_RATE * CROSSFADE_MS / 1000)
 INTER_CHUNK_SILENCE_MS = 350  # silence gap between chunks for natural pacing
 INTER_CHUNK_SILENCE_SAMPLES = int(SAMPLE_RATE * INTER_CHUNK_SILENCE_MS / 1000)
 
+# Default latent-to-seconds: 640 latents ≈ 30s of audio
+LATENTS_PER_SECOND = 640 / 30.0  # ~21.33
+
+
+def get_chunk_timing(sample_latent_length: int = 640) -> dict:
+    """Derive chunk_text_by_time timing params from sample_latent_length.
+
+    Returns dict with target_seconds, min_seconds, max_seconds suitable
+    for passing as **kwargs to chunk_text_by_time().
+    """
+    window_seconds = sample_latent_length / LATENTS_PER_SECOND
+    # Target a couple seconds below the window to stay safe
+    target = max(window_seconds - 2.0, 4.0)
+    # Min at ~60% of target, max at window + small margin
+    min_sec = max(target * 0.6, 3.0)
+    max_sec = window_seconds + 2.0
+    return dict(target_seconds=target, min_seconds=min_sec, max_seconds=max_sec)
+
 
 def _crossfade_chunks(
     chunks: List[torch.Tensor],
@@ -146,6 +164,7 @@ def generate_single_chunk_with_latents(
     speaker_kv_min_t: Optional[float] = None,
     speaker_kv_max_layers: Optional[int] = None,
     sample_latent_length: int = 640,
+    fish_ae_ctx: Optional[Callable] = None,
 ) -> torch.Tensor:
     """Generate audio for a single chunk using precomputed speaker latents directly."""
     device, dtype = model.device, model.dtype
@@ -178,7 +197,16 @@ def generate_single_chunk_with_latents(
         sequence_length=sample_latent_length,
     )
 
-    audio_out = ae_decode(fish_ae, pca_state, latent_out)
+    # Free diffusion intermediates before ae_decode brings fish_ae onto GPU
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Decode latents to audio — use offload context if provided
+    if fish_ae_ctx is not None:
+        with fish_ae_ctx() as ae:
+            audio_out = ae_decode(ae, pca_state, latent_out)
+    else:
+        audio_out = ae_decode(fish_ae, pca_state, latent_out)
     audio_out = crop_audio_to_flattening_point(audio_out, latent_out[0])
 
     return audio_out
@@ -208,6 +236,7 @@ def generate_long_form(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     crossfade_ms: int = CROSSFADE_MS,
     inter_chunk_silence_ms: int = INTER_CHUNK_SILENCE_MS,
+    fish_ae_ctx: Optional[Callable] = None,
 ) -> Tuple[torch.Tensor, str, List[str]]:
     """Generate long-form audio by chunking text and stitching with crossfade.
 
@@ -217,6 +246,8 @@ def generate_long_form(
         speaker_latent: Precomputed speaker latent, or None.
         speaker_mask: Precomputed speaker mask, or None.
         progress_callback: Optional fn(chunk_idx, total_chunks, chunk_text) for UI updates.
+        fish_ae_ctx: Optional callable returning a context manager that yields
+                     fish_ae on the compute device. Used for VRAM offloading.
 
     Returns:
         (audio_tensor, normalized_full_text, chunk_texts)
@@ -227,10 +258,17 @@ def generate_long_form(
     no_speaker = speaker_latent is None and speaker_mask is None and speaker_audio is None
     if speaker_latent is None or speaker_mask is None:
         if speaker_audio is not None:
-            speaker_latent, speaker_mask = get_speaker_latent_and_mask(
-                fish_ae, pca_state,
-                speaker_audio.to(fish_ae.dtype).to(device),
-            )
+            if fish_ae_ctx is not None:
+                with fish_ae_ctx() as ae:
+                    speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                        ae, pca_state,
+                        speaker_audio.to(ae.dtype).to(device),
+                    )
+            else:
+                speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                    fish_ae, pca_state,
+                    speaker_audio.to(fish_ae.dtype).to(device),
+                )
         else:
             speaker_latent = torch.zeros((1, 4, 80), device=device, dtype=dtype)
             speaker_mask = torch.zeros((1, 4), device=device, dtype=torch.bool)
@@ -239,8 +277,9 @@ def generate_long_form(
     speaker_latent = speaker_latent[:, :speaker_latent.shape[1] // 4 * 4]
     speaker_mask = speaker_mask[:, :speaker_mask.shape[1] // 4 * 4]
 
-    # Chunk the text
-    chunks = chunk_text_by_time(text)
+    # Chunk the text using timing derived from latent length
+    chunk_timing = get_chunk_timing(sample_latent_length)
+    chunks = chunk_text_by_time(text, **chunk_timing)
     if not chunks:
         chunks = [preprocess_text(text)]
 
@@ -280,6 +319,7 @@ def generate_long_form(
             speaker_kv_min_t=speaker_kv_min_t,
             speaker_kv_max_layers=speaker_kv_max_layers,
             sample_latent_length=sample_latent_length,
+            fish_ae_ctx=fish_ae_ctx,
         )
 
         elapsed = time.time() - t0
@@ -293,15 +333,25 @@ def generate_long_form(
         # speaker reference for all subsequent chunks. This locks the voice identity.
         if no_speaker and i == 0 and total > 1:
             print("[generate] Self-cloning: encoding chunk 1 audio as speaker reference for remaining chunks")
+            # Free diffusion intermediates before fish_ae encode
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             with torch.inference_mode():
                 clone_audio = flat_audio.unsqueeze(0) if flat_audio.ndim == 1 else flat_audio
                 if clone_audio.ndim == 2:
                     clone_audio = clone_audio.unsqueeze(0)  # (1, 1, samples) -> need (1, samples)
                     clone_audio = clone_audio.squeeze(0)     # back to (1, samples)
-                speaker_latent, speaker_mask = get_speaker_latent_and_mask(
-                    fish_ae, pca_state,
-                    clone_audio.to(fish_ae.dtype).to(device),
-                )
+                if fish_ae_ctx is not None:
+                    with fish_ae_ctx() as ae:
+                        speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                            ae, pca_state,
+                            clone_audio.to(ae.dtype).to(device),
+                        )
+                else:
+                    speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                        fish_ae, pca_state,
+                        clone_audio.to(fish_ae.dtype).to(device),
+                    )
                 speaker_latent = speaker_latent[:, :speaker_latent.shape[1] // 4 * 4]
                 speaker_mask = speaker_mask[:, :speaker_mask.shape[1] // 4 * 4]
             no_speaker = False  # Now we have a speaker, vary seeds for natural variation
@@ -369,6 +419,7 @@ def generate_dubbed_audio(
     sample_latent_length: int = 640,
     stretch_range: Tuple[float, float] = (0.7, 1.5),
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    fish_ae_ctx: Optional[Callable] = None,
 ) -> Tuple[torch.Tensor, List[dict]]:
     """Generate time-aligned dubbed audio from transcription segments.
 
@@ -399,10 +450,17 @@ def generate_dubbed_audio(
     no_speaker = speaker_latent is None and speaker_mask is None and speaker_audio is None
     if speaker_latent is None or speaker_mask is None:
         if speaker_audio is not None:
-            speaker_latent, speaker_mask = get_speaker_latent_and_mask(
-                fish_ae, pca_state,
-                speaker_audio.to(fish_ae.dtype).to(device),
-            )
+            if fish_ae_ctx is not None:
+                with fish_ae_ctx() as ae:
+                    speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                        ae, pca_state,
+                        speaker_audio.to(ae.dtype).to(device),
+                    )
+            else:
+                speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                    fish_ae, pca_state,
+                    speaker_audio.to(fish_ae.dtype).to(device),
+                )
         else:
             speaker_latent = torch.zeros((1, 4, 80), device=device, dtype=dtype)
             speaker_mask = torch.zeros((1, 4), device=device, dtype=torch.bool)
@@ -450,6 +508,7 @@ def generate_dubbed_audio(
             speaker_kv_min_t=speaker_kv_min_t,
             speaker_kv_max_layers=speaker_kv_max_layers,
             sample_latent_length=sample_latent_length,
+            fish_ae_ctx=fish_ae_ctx,
         )
 
         flat_audio = chunk_audio[0] if chunk_audio.ndim == 3 else chunk_audio
@@ -466,11 +525,20 @@ def generate_dubbed_audio(
         # Self-clone after first segment if no speaker provided
         if no_speaker and i == 0 and total > 1:
             print("[dub] Self-cloning: encoding segment 1 audio as speaker reference")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             with torch.inference_mode():
-                clone_audio = flat_audio.to(fish_ae.dtype).to(device)
-                speaker_latent, speaker_mask = get_speaker_latent_and_mask(
-                    fish_ae, pca_state, clone_audio,
-                )
+                if fish_ae_ctx is not None:
+                    with fish_ae_ctx() as ae:
+                        clone_audio = flat_audio.to(ae.dtype).to(device)
+                        speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                            ae, pca_state, clone_audio,
+                        )
+                else:
+                    clone_audio = flat_audio.to(fish_ae.dtype).to(device)
+                    speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                        fish_ae, pca_state, clone_audio,
+                    )
                 speaker_latent = speaker_latent[:, :speaker_latent.shape[1] // 4 * 4]
                 speaker_mask = speaker_mask[:, :speaker_mask.shape[1] // 4 * 4]
             no_speaker = False
