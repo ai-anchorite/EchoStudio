@@ -279,9 +279,15 @@ def on_save_voice(name: str, audio_path: str):
     name = name.strip()
     try:
         audio = load_audio(audio_path).to(model_manager.device)
-        speaker_latent, speaker_mask = get_speaker_latent_and_mask(
-            model_manager.fish_ae, model_manager.pca_state, audio.to(model_manager.fish_ae.dtype).to(model_manager.device),
-        )
+        if model_manager.offload_fish_ae:
+            with model_manager.fish_ae_on_device() as ae:
+                speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                    ae, model_manager.pca_state, audio.to(ae.dtype).to(model_manager.device),
+                )
+        else:
+            speaker_latent, speaker_mask = get_speaker_latent_and_mask(
+                model_manager.fish_ae, model_manager.pca_state, audio.to(model_manager.fish_ae.dtype).to(model_manager.device),
+            )
         save_voice(name, audio_path, speaker_latent, speaker_mask)
     except Exception as e:
         return gr.update(), gr.update(value=f"Error: {e}")
